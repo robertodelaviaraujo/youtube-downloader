@@ -2,12 +2,11 @@ const express = require('express');
 const { exec } = require('youtube-dl-exec');
 const fs = require('fs');
 const path = require('path');
-const ytpl = require('ytpl');
 const cors = require('cors');
 const archiver = require('archiver');
+const axios = require('axios');
 const app = express();
 const port = process.env.PORT || 5000;
-const os = require('os'); // Para obter diretório temporário do sistema
 
 // Configuração básica do CORS
 app.use(cors());
@@ -18,11 +17,45 @@ const sanitizeFileName = (name) => {
     return name.replace(/[<>:"/\\|?*]+/g, '').trim();
 };
 
+// Função para obter vídeos da playlist (ignora privados)
+const getPlaylistVideos = async (playlistId, apiKey) => {
+    let videos = [];
+    let nextPageToken = '';
+    do {
+        const response = await axios.get('https://www.googleapis.com/youtube/v3/playlistItems', {
+            params: {
+                part: 'snippet,status',
+                playlistId,
+                maxResults: 50,
+                pageToken: nextPageToken,
+                key: apiKey,
+            },
+        });
+
+        const items = response.data.items;
+        items.forEach(item => {
+            const videoId = item.snippet.resourceId.videoId;
+            const title = item.snippet.title;
+            const privacyStatus = item.status.privacyStatus;
+
+            // Ignorar vídeos privados ou não listados
+            if (privacyStatus !== 'private') {
+                videos.push({ videoId, title });
+            }
+        });
+
+        nextPageToken = response.data.nextPageToken;
+    } while (nextPageToken);
+
+    return videos;
+};
+
 // Função para converter o vídeo para MP3
 const convertToMP3 = async (videoName, videoUrl, outputDir) => {
-    console.log('convertToMP3 (cookies)...');
     const sanitizedVideoName = sanitizeFileName(videoName); // Sanitizar o nome do vídeo
     const outputPath = path.join(outputDir, `${sanitizedVideoName}.mp3`);
+
+    console.log("🚀 ~ Converting :", sanitizedVideoName)
 
     return new Promise((resolve, reject) => {
         exec(videoUrl, {
@@ -30,21 +63,18 @@ const convertToMP3 = async (videoName, videoUrl, outputDir) => {
             extractAudio: true,
             audioFormat: 'mp3',
             audioQuality: '128K',
-            cookies: path.join(__dirname, 'cookies.txt'), // Caminho para o arquivo de cookies
         })
             .then(() => resolve(outputPath))
             .catch((err) => reject(err));
     });
 };
 
-
 // Função para gerar o arquivo ZIP
 const createZip = (outputDir, files, zipFilePath) => {
-    console.log('createZip...');
     return new Promise((resolve, reject) => {
         const output = fs.createWriteStream(zipFilePath);
         const archive = archiver('zip', {
-            zlib: { level: 9 },
+            zlib: { level: 9 }, // Nível de compactação
         });
 
         output.on('close', () => resolve(zipFilePath));
@@ -53,7 +83,7 @@ const createZip = (outputDir, files, zipFilePath) => {
         archive.pipe(output);
 
         // Adiciona os arquivos MP3 ao ZIP
-        files.forEach((file) => {
+        files.forEach(file => {
             archive.file(path.join(outputDir, file), { name: file });
         });
 
@@ -61,64 +91,51 @@ const createZip = (outputDir, files, zipFilePath) => {
     });
 };
 
-// Função para excluir diretório de forma segura
-const deleteDirectory = async (dirPath) => {
-    try {
-        const files = await fs.promises.readdir(dirPath);
-        for (const file of files) {
-            const filePath = path.join(dirPath, file);
-            await fs.promises.unlink(filePath); // Remove o arquivo
-        }
-        await fs.promises.rmdir(dirPath); // Remove o diretório
-        console.log('Diretório removido com sucesso:', dirPath);
-    } catch (error) {
-        console.error('Erro ao remover o diretório:', error);
-    }
-};
-
-// Endpoint para converter playlist
 // Endpoint para converter playlist
 app.post('/convert-playlist', async (req, res) => {
-    const { playlistUrls } = req.body;
-    console.log("🚀 ~ playlistUrls:", playlistUrls);
+    const { playlistUrls, apiKey } = req.body;
 
-    if (!playlistUrls || playlistUrls.length === 0) {
-        return res.status(400).send({ error: 'Nenhuma URL de playlist fornecida.' });
+    if (!playlistUrls || playlistUrls.length === 0 || !apiKey) {
+        return res.status(400).send({ error: 'URLs da playlist ou API Key não fornecidos.' });
     }
 
-    // Criar um diretório temporário
-    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'playlist-'));
-    console.log('Diretório temporário criado:', outputDir);
+    // Diretório temporário para salvar os arquivos
+    const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'playlist-'));
 
     try {
         let allVideos = [];
-
         for (let playlistUrl of playlistUrls) {
-            console.log("🚀 ~ playlistUrl:", playlistUrl);
-            const playlist = await ytpl(playlistUrl, { pages: 1 });
+            // Extrair o ID da playlist da URL
+            const playlistId = new URL(playlistUrl).searchParams.get('list');
+            if (!playlistId) {
+                return res.status(400).send({ error: 'URL inválida para a playlist.' });
+            }
 
-            for (let video of playlist.items) {
-                const videoUrl = video.shortUrl;
-                const videoName = video.title;
+            const videos = await getPlaylistVideos(playlistId, apiKey);
 
-                await convertToMP3(videoName, videoUrl, outputDir);
-                allVideos.push(`${sanitizeFileName(videoName)}.mp3`);
+            for (let video of videos) {
+                try {
+                    const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
+                    await convertToMP3(video.title, videoUrl, tempDir);
+                    allVideos.push(`${sanitizeFileName(video.title)}.mp3`);
+                } catch (error) {
+                    console.error(`Erro ao processar vídeo "${video.title}":`, error.message);
+                }
             }
         }
 
         // Criar o arquivo ZIP
-        const zipFilePath = path.join(outputDir, 'playlist_files.zip');
-        console.log("🚀 ~ zipFilePath:", zipFilePath);
-        await createZip(outputDir, allVideos, zipFilePath);
+        const zipFilePath = path.join(tempDir, 'playlist_files.zip');
+        await createZip(tempDir, allVideos, zipFilePath);
 
         // Enviar o arquivo ZIP para o cliente
-        res.download(zipFilePath, 'playlist_files.zip', async (err) => {
+        res.download(zipFilePath, 'playlist_files.zip', (err) => {
             if (err) {
                 console.error('Erro ao enviar o arquivo:', err);
                 res.status(500).send({ error: 'Erro ao enviar o arquivo.' });
             } else {
                 // Após o download, exclua o diretório temporário
-                await deleteDirectory(outputDir);
+                fs.rmSync(tempDir, { recursive: true, force: true });
             }
         });
     } catch (error) {
