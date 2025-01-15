@@ -63,6 +63,8 @@ const convertToMP3 = async (videoName, videoUrl, outputDir) => {
             extractAudio: true,
             audioFormat: 'mp3',
             audioQuality: '128K',
+            verbose: true, // Para informações detalhadas
+            noCheckCertificates: true, // Ignorar certificados SSL inválidos
         })
             .then(() => resolve(outputPath))
             .catch((err) => reject(err));
