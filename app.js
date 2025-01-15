@@ -5,7 +5,7 @@ const path = require('path');
 const cors = require('cors');
 const archiver = require('archiver');
 const axios = require('axios');
-const os = require('os');
+const os = require('os'); // Para obter diretórios temporários do sistema operacional
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -56,7 +56,7 @@ const convertToMP3 = async (videoName, videoUrl, outputDir) => {
     const sanitizedVideoName = sanitizeFileName(videoName); // Sanitizar o nome do vídeo
     const outputPath = path.join(outputDir, `${sanitizedVideoName}.mp3`);
 
-    console.log("🚀 ~ Converting :", sanitizedVideoName)
+    console.log(`Converting ${sanitizedVideoName} to MP3 at ${outputDir}`)
 
     return new Promise((resolve, reject) => {
         exec(videoUrl, {
@@ -100,11 +100,12 @@ app.post('/convert-playlist', async (req, res) => {
         return res.status(400).send({ error: 'URLs da playlist ou API Key não fornecidos.' });
     }
 
-    // Diretório temporário para salvar os arquivos (no Render, pode ser necessário mudar o diretório temporário)
-    const tempDir = path.join(__dirname, 'tmp'); // Diretório dentro do próprio projeto
+    // Usando o diretório temporário correto dependendo do ambiente
+    const convertDir = os.tmpdir(); // Diretório temporário do sistema
+    const convertFolder = path.join(convertDir, 'convert'); // Cria subpasta 'convert'
 
-    if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir);
+    if (!fs.existsSync(convertFolder)) {
+        fs.mkdirSync(convertFolder);
     }
 
     try {
@@ -121,7 +122,7 @@ app.post('/convert-playlist', async (req, res) => {
             for (let video of videos) {
                 try {
                     const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
-                    await convertToMP3(video.title, videoUrl, tempDir);
+                    await convertToMP3(video.title, videoUrl, convertFolder);
                     allVideos.push(`${sanitizeFileName(video.title)}.mp3`);
                 } catch (error) {
                     console.error(`Erro ao processar vídeo "${video.title}":`, error.message);
@@ -130,8 +131,8 @@ app.post('/convert-playlist', async (req, res) => {
         }
 
         // Criar o arquivo ZIP
-        const zipFilePath = path.join(tempDir, 'playlist_files.zip');
-        await createZip(tempDir, allVideos, zipFilePath);
+        const zipFilePath = path.join(convertFolder, 'playlist_files.zip');
+        await createZip(convertFolder, allVideos, zipFilePath);
 
         // Enviar o arquivo ZIP para o cliente
         res.download(zipFilePath, 'playlist_files.zip', (err) => {
@@ -139,8 +140,11 @@ app.post('/convert-playlist', async (req, res) => {
                 console.error('Erro ao enviar o arquivo:', err);
                 res.status(500).send({ error: 'Erro ao enviar o arquivo.' });
             } else {
-                // Após o download, exclua o diretório temporário
-                fs.rmSync(tempDir, { recursive: true, force: true });
+                // Após o download, excluir o conteúdo do diretório temporário
+                fs.readdirSync(convertFolder).forEach((file) => {
+                    const filePath = path.join(convertFolder, file);
+                    fs.rmSync(filePath, { recursive: true, force: true });
+                });
             }
         });
     } catch (error) {
