@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const ytpl = require('ytpl');
 const cors = require('cors');
+const archiver = require('archiver');
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -25,6 +26,7 @@ const sanitizeFileName = (name) => {
 
 // Função para converter o vídeo para MP3
 const convertToMP3 = async (videoName, videoUrl, outputDir) => {
+    console.log('convertToMP3...')
     const sanitizedVideoName = sanitizeFileName(videoName); // Sanitizar o nome do vídeo
     const outputPath = path.join(outputDir, `${sanitizedVideoName}.mp3`);
 
@@ -37,6 +39,29 @@ const convertToMP3 = async (videoName, videoUrl, outputDir) => {
         })
             .then(() => resolve(outputPath))
             .catch((err) => reject(err));
+    });
+};
+
+// Função para gerar o arquivo ZIP
+const createZip = (outputDir, files, zipFilePath) => {
+    console.log('createZip...')
+    return new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(zipFilePath);
+        const archive = archiver('zip', {
+            zlib: { level: 9 } // Nível de compactação
+        });
+
+        output.on('close', () => resolve(zipFilePath));
+        archive.on('error', (err) => reject(err));
+
+        archive.pipe(output);
+
+        // Adiciona os arquivos MP3 ao ZIP
+        files.forEach(file => {
+            archive.file(path.join(outputDir, file), { name: file });
+        });
+
+        archive.finalize();
     });
 };
 
@@ -55,6 +80,7 @@ app.post('/convert-playlist', async (req, res) => {
     try {
         let allVideos = [];
         for (let playlistUrl of playlistUrls) {
+            console.log("🚀 ~ playlistUrl:", playlistUrl)
             const playlist = await ytpl(playlistUrl, { pages: 1 });
 
             for (let video of playlist.items) {
@@ -62,11 +88,25 @@ app.post('/convert-playlist', async (req, res) => {
                 const videoName = video.title;
 
                 await convertToMP3(videoName, videoUrl, outputDir);
-                allVideos.push(videoName);
+                allVideos.push(`${sanitizeFileName(videoName)}.mp3`);
             }
         }
 
-        res.send({ message: 'Download concluído!', files: allVideos });
+        // Criar o arquivo ZIP
+        const zipFilePath = path.join(outputDir, 'playlist_files.zip');
+        console.log("🚀 ~ zipFilePath:", zipFilePath)
+        await createZip(outputDir, allVideos, zipFilePath);
+
+        // Enviar o arquivo ZIP para o cliente
+        res.download(zipFilePath, 'playlist_files.zip', (err) => {
+            if (err) {
+                console.error('Erro ao enviar o arquivo:', err);
+                res.status(500).send({ error: 'Erro ao enviar o arquivo.' });
+            } else {
+                // Após o download, exclua o arquivo ZIP temporário
+                fs.unlinkSync(zipFilePath);
+            }
+        });
     } catch (error) {
         console.error('Erro ao processar playlist:', error);
         res.status(500).send({ error: 'Erro ao processar playlist.' });
