@@ -20,8 +20,8 @@ const sanitizeFileName = (name) => {
 
 // Função para converter o vídeo para MP3
 const convertToMP3 = async (videoName, videoUrl, outputDir) => {
-    console.log('convertToMP3...');
-    const sanitizedVideoName = sanitizeFileName(videoName);
+    console.log('convertToMP3 (cookies)...');
+    const sanitizedVideoName = sanitizeFileName(videoName); // Sanitizar o nome do vídeo
     const outputPath = path.join(outputDir, `${sanitizedVideoName}.mp3`);
 
     return new Promise((resolve, reject) => {
@@ -30,11 +30,13 @@ const convertToMP3 = async (videoName, videoUrl, outputDir) => {
             extractAudio: true,
             audioFormat: 'mp3',
             audioQuality: '128K',
+            cookies: path.join(__dirname, 'cookies.txt'), // Caminho para o arquivo de cookies
         })
             .then(() => resolve(outputPath))
             .catch((err) => reject(err));
     });
 };
+
 
 // Função para gerar o arquivo ZIP
 const createZip = (outputDir, files, zipFilePath) => {
