@@ -5,6 +5,7 @@ const path = require('path');
 const cors = require('cors');
 const archiver = require('archiver');
 const axios = require('axios');
+const os = require('os');
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -50,13 +51,12 @@ const getPlaylistVideos = async (playlistId, apiKey) => {
     return videos;
 };
 
-// Função para converter o vídeo para MP3 com logs adicionais
+// Função para converter o vídeo para MP3
 const convertToMP3 = async (videoName, videoUrl, outputDir) => {
     const sanitizedVideoName = sanitizeFileName(videoName); // Sanitizar o nome do vídeo
     const outputPath = path.join(outputDir, `${sanitizedVideoName}.mp3`);
 
-    console.log("🚀 ~ Converting:", sanitizedVideoName);
-    console.log(`Arquivo de saída: ${outputPath}`);
+    console.log("🚀 ~ Converting :", sanitizedVideoName)
 
     return new Promise((resolve, reject) => {
         exec(videoUrl, {
@@ -65,17 +65,12 @@ const convertToMP3 = async (videoName, videoUrl, outputDir) => {
             audioFormat: 'mp3',
             audioQuality: '128K',
         })
-            .then(() => {
-                console.log(`Vídeo convertido com sucesso: ${outputPath}`);
-                resolve(outputPath);
-            })
-            .catch((err) => {
-                console.error(`Erro ao converter "${videoName}":`, err.message);
-                reject(err);
-            });
+            .then(() => resolve(outputPath))
+            .catch((err) => reject(err));
     });
 };
 
+// Função para gerar o arquivo ZIP
 const createZip = (outputDir, files, zipFilePath) => {
     return new Promise((resolve, reject) => {
         const output = fs.createWriteStream(zipFilePath);
@@ -83,51 +78,21 @@ const createZip = (outputDir, files, zipFilePath) => {
             zlib: { level: 9 }, // Nível de compactação
         });
 
-        output.on('close', () => {
-            console.log(`Arquivo ZIP criado com sucesso: ${zipFilePath}, tamanho: ${archive.pointer()} bytes`);
-            resolve(zipFilePath);
-        });
-
-        archive.on('error', (err) => {
-            console.error('Erro ao criar o arquivo ZIP:', err);
-            reject(err);
-        });
+        output.on('close', () => resolve(zipFilePath));
+        archive.on('error', (err) => reject(err));
 
         archive.pipe(output);
 
-        // Antes de adicionar ao ZIP, verificar o conteúdo do diretório temporário
-        console.log("Arquivos no diretório temporário:");
-        const filesInDir = fs.readdirSync(outputDir);
-        console.log(filesInDir);
-
         // Adiciona os arquivos MP3 ao ZIP
         files.forEach(file => {
-            const filePath = path.join(outputDir, file);
-            if (fs.existsSync(filePath)) {
-                console.log(`Adicionando ao ZIP: ${filePath}`);
-                archive.file(filePath, { name: file });
-            } else {
-                console.warn(`Arquivo não encontrado para o ZIP: ${filePath}`);
-            }
+            archive.file(path.join(outputDir, file), { name: file });
         });
 
         archive.finalize();
     });
 };
 
-// Função para remover diretório de forma segura
-const removeDirectory = async (dirPath) => {
-    try {
-        // Tentar remover o diretório
-        await fs.promises.rm(dirPath, { recursive: true, force: true });
-        console.log(`Diretório removido com sucesso: ${dirPath}`);
-    } catch (err) {
-        console.error(`Erro ao remover o diretório ${dirPath}:`, err);
-        throw err;
-    }
-};
-
-// Endpoint atualizado com logs detalhados
+// Endpoint para converter playlist
 app.post('/convert-playlist', async (req, res) => {
     const { playlistUrls, apiKey } = req.body;
 
@@ -135,12 +100,17 @@ app.post('/convert-playlist', async (req, res) => {
         return res.status(400).send({ error: 'URLs da playlist ou API Key não fornecidos.' });
     }
 
-    // Diretório temporário para salvar os arquivos
-    const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'playlist-'));
+    // Diretório temporário para salvar os arquivos (no Render, pode ser necessário mudar o diretório temporário)
+    const tempDir = path.join(__dirname, 'tmp'); // Diretório dentro do próprio projeto
+
+    if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir);
+    }
 
     try {
         let allVideos = [];
         for (let playlistUrl of playlistUrls) {
+            // Extrair o ID da playlist da URL
             const playlistId = new URL(playlistUrl).searchParams.get('list');
             if (!playlistId) {
                 return res.status(400).send({ error: 'URL inválida para a playlist.' });
@@ -151,17 +121,12 @@ app.post('/convert-playlist', async (req, res) => {
             for (let video of videos) {
                 try {
                     const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
-                    const filePath = await convertToMP3(video.title, videoUrl, tempDir);
-                    console.log(`Vídeo convertido com sucesso: ${filePath}`);
-                    allVideos.push(path.basename(filePath)); // Apenas o nome do arquivo
+                    await convertToMP3(video.title, videoUrl, tempDir);
+                    allVideos.push(`${sanitizeFileName(video.title)}.mp3`);
                 } catch (error) {
                     console.error(`Erro ao processar vídeo "${video.title}":`, error.message);
                 }
             }
-        }
-
-        if (allVideos.length === 0) {
-            return res.status(500).send({ error: 'Nenhum vídeo foi convertido com sucesso.' });
         }
 
         // Criar o arquivo ZIP
@@ -169,13 +134,13 @@ app.post('/convert-playlist', async (req, res) => {
         await createZip(tempDir, allVideos, zipFilePath);
 
         // Enviar o arquivo ZIP para o cliente
-        res.download(zipFilePath, 'playlist_files.zip', async (err) => {
+        res.download(zipFilePath, 'playlist_files.zip', (err) => {
             if (err) {
                 console.error('Erro ao enviar o arquivo:', err);
                 res.status(500).send({ error: 'Erro ao enviar o arquivo.' });
             } else {
                 // Após o download, exclua o diretório temporário
-                await removeDirectory(tempDir);
+                fs.rmSync(tempDir, { recursive: true, force: true });
             }
         });
     } catch (error) {
